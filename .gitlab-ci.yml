@@ -2,7 +2,7 @@
 pages:
   image: node:22
   script:
-    - npm ci
+    - npm install --no-audit --no-fund
     - npm run build
     - cp -r dist public
   artifacts:
