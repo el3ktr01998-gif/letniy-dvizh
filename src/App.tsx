@@ -1,4 +1,7 @@
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
+import { useLiveQuery } from 'dexie-react-hooks'
+import { db, DEFAULT_SETTINGS, type Settings } from './db.ts'
+import Onboarding from './Onboarding.tsx'
 import DvizhiPage from './pages/DvizhiPage.tsx'
 import ChallengesPage from './pages/ChallengesPage.tsx'
 import SettingsPage from './pages/SettingsPage.tsx'
@@ -10,6 +13,23 @@ const tabs = [
 ]
 
 export default function App() {
+  // null = ещё загружается; после загрузки — настройки (или дефолтные).
+  // Если настроек нет, но движухи уже есть (старые пользователи) —
+  // онбординг не показываем.
+  const settings = useLiveQuery<Settings, null>(
+    async () => {
+      const s = await db.settings.get('main')
+      if (s) return s
+      const count = await db.dvizh.count()
+      return { ...DEFAULT_SETTINGS, onboardingCompleted: count > 0 }
+    },
+    [],
+    null,
+  )
+
+  if (settings === null) return null
+  if (!settings.onboardingCompleted) return <Onboarding />
+
   return (
     <div className="mx-auto flex h-dvh max-w-md flex-col">
       <main className="flex-1 overflow-y-auto px-4 pb-2 pt-6">
