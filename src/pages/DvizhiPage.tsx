@@ -1,12 +1,25 @@
 import { useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { db, CATEGORIES, DEFAULT_SETTINGS, type Category, type Dvizh } from '../db.ts'
+import {
+  db,
+  CATEGORIES,
+  DEFAULT_SETTINGS,
+  type Category,
+  type Challenge,
+  type Dvizh,
+} from '../db.ts'
+import { WEEKDAY_LABELS, todayStr, defaultEndDate } from '../lib/dates.ts'
 
 type Filter = 'Все' | Category
 
+interface EditState {
+  dvizh: Dvizh | null
+  challenge: Challenge | null
+}
+
 export default function DvizhiPage() {
   const [filter, setFilter] = useState<Filter>('Все')
-  const [editing, setEditing] = useState<Dvizh | 'new' | null>(null)
+  const [editing, setEditing] = useState<EditState | null>(null)
 
   const settings = useLiveQuery(() => db.settings.get('main'))
   const limit = settings?.wishLimit ?? DEFAULT_SETTINGS.wishLimit
@@ -35,7 +48,20 @@ export default function DvizhiPage() {
   }
 
   async function remove(d: Dvizh) {
-    if (confirm(`Удалить «${d.title}»?`)) await db.dvizh.delete(d.id)
+    if (!confirm(`Удалить «${d.title}»?`)) return
+    await db.transaction('rw', db.dvizh, db.challenge, db.checkin, async () => {
+      const ch = await db.challenge.where('dvizhId').equals(d.id).first()
+      if (ch) {
+        await db.checkin.where('challengeId').equals(ch.id).delete()
+        await db.challenge.delete(ch.id)
+      }
+      await db.dvizh.delete(d.id)
+    })
+  }
+
+  async function openEdit(d: Dvizh) {
+    const ch = await db.challenge.where('dvizhId').equals(d.id).first()
+    setEditing({ dvizh: d, challenge: ch ?? null })
   }
 
   return (
@@ -106,7 +132,7 @@ export default function DvizhiPage() {
               </div>
               <div className="flex shrink-0 gap-1">
                 <button
-                  onClick={() => setEditing(d)}
+                  onClick={() => openEdit(d)}
                   aria-label="Редактировать"
                   className="rounded p-1.5 text-stone-400 hover:text-stone-600"
                 >
@@ -134,7 +160,7 @@ export default function DvizhiPage() {
           </p>
         ) : (
           <button
-            onClick={() => setEditing('new')}
+            onClick={() => setEditing({ dvizh: null, challenge: null })}
             className="w-full rounded-xl bg-amber-500 py-3 font-semibold text-white shadow-sm active:bg-amber-600"
           >
             + Добавить движуху
@@ -144,7 +170,8 @@ export default function DvizhiPage() {
 
       {editing !== null && (
         <DvizhForm
-          dvizh={editing === 'new' ? null : editing}
+          dvizh={editing.dvizh}
+          challenge={editing.challenge}
           onClose={() => setEditing(null)}
         />
       )}
@@ -152,27 +179,72 @@ export default function DvizhiPage() {
   )
 }
 
-function DvizhForm({ dvizh, onClose }: { dvizh: Dvizh | null; onClose: () => void }) {
+function DvizhForm({
+  dvizh,
+  challenge,
+  onClose,
+}: {
+  dvizh: Dvizh | null
+  challenge: Challenge | null
+  onClose: () => void
+}) {
   const [title, setTitle] = useState(dvizh?.title ?? '')
   const [note, setNote] = useState(dvizh?.note ?? '')
   const [category, setCategory] = useState<Category>(dvizh?.category ?? 'Прочее')
+  const [isChallenge, setIsChallenge] = useState(challenge !== null)
+  const [daysOfWeek, setDaysOfWeek] = useState<number[]>(challenge?.daysOfWeek ?? [])
+  const [startDate, setStartDate] = useState(challenge?.startDate ?? todayStr())
+  const [endDate, setEndDate] = useState(
+    challenge?.endDate ?? defaultEndDate(todayStr()),
+  )
+
+  function toggleDay(d: number) {
+    setDaysOfWeek((prev) =>
+      prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d],
+    )
+  }
+
+  const challengeValid =
+    !isChallenge || (daysOfWeek.length > 0 && startDate <= endDate)
 
   async function save() {
     const t = title.trim()
-    if (!t) return
-    if (dvizh) {
-      await db.dvizh.update(dvizh.id, { title: t, note: note.trim(), category })
-    } else {
-      await db.dvizh.add({
-        id: crypto.randomUUID(),
-        title: t,
-        note: note.trim(),
-        category,
-        status: 'active',
-        createdAt: new Date().toISOString(),
-        doneAt: null,
-      })
-    }
+    if (!t || !challengeValid) return
+    const dvizhId = dvizh?.id ?? crypto.randomUUID()
+
+    await db.transaction('rw', db.dvizh, db.challenge, db.checkin, async () => {
+      if (dvizh) {
+        await db.dvizh.update(dvizh.id, { title: t, note: note.trim(), category })
+      } else {
+        await db.dvizh.add({
+          id: dvizhId,
+          title: t,
+          note: note.trim(),
+          category,
+          status: 'active',
+          createdAt: new Date().toISOString(),
+          doneAt: null,
+        })
+      }
+
+      const existing = await db.challenge.where('dvizhId').equals(dvizhId).first()
+      if (isChallenge) {
+        if (existing) {
+          await db.challenge.update(existing.id, { startDate, endDate, daysOfWeek })
+        } else {
+          await db.challenge.add({
+            id: crypto.randomUUID(),
+            dvizhId,
+            startDate,
+            endDate,
+            daysOfWeek,
+          })
+        }
+      } else if (existing) {
+        await db.checkin.where('challengeId').equals(existing.id).delete()
+        await db.challenge.delete(existing.id)
+      }
+    })
     onClose()
   }
 
@@ -182,14 +254,14 @@ function DvizhForm({ dvizh, onClose }: { dvizh: Dvizh | null; onClose: () => voi
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md rounded-t-2xl bg-white p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"
+        className="max-h-[90dvh] w-full max-w-md overflow-y-auto rounded-t-2xl bg-white p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="text-lg font-bold text-stone-800">
           {dvizh ? 'Редактировать' : 'Новая движуха'}
         </h2>
         <input
-          autoFocus
+          autoFocus={!dvizh}
           value={title}
           onChange={(e) => setTitle(e.target.value)}
           placeholder="Что сделаем этим летом?"
@@ -217,6 +289,68 @@ function DvizhForm({ dvizh, onClose }: { dvizh: Dvizh | null; onClose: () => voi
             </button>
           ))}
         </div>
+
+        <label className="mt-4 flex items-center justify-between rounded-xl bg-amber-50 p-3">
+          <span className="font-medium text-stone-800">Сделать челленджем 🏆</span>
+          <input
+            type="checkbox"
+            checked={isChallenge}
+            onChange={(e) => setIsChallenge(e.target.checked)}
+            className="h-5 w-5 accent-amber-500"
+          />
+        </label>
+
+        {isChallenge && (
+          <div className="mt-2 rounded-xl border border-amber-200 p-3">
+            <p className="text-sm font-medium text-stone-700">Дни недели</p>
+            <div className="mt-2 flex gap-1.5">
+              {WEEKDAY_LABELS.map((w, i) => (
+                <button
+                  key={w}
+                  onClick={() => toggleDay(i + 1)}
+                  className={`h-9 flex-1 rounded-lg text-sm ${
+                    daysOfWeek.includes(i + 1)
+                      ? 'bg-amber-500 font-semibold text-white'
+                      : 'bg-amber-100 text-stone-600'
+                  }`}
+                >
+                  {w}
+                </button>
+              ))}
+            </div>
+            <div className="mt-3 flex gap-2">
+              <label className="flex-1 text-sm text-stone-600">
+                С
+                <input
+                  type="date"
+                  value={startDate}
+                  onChange={(e) => setStartDate(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-amber-200 p-2"
+                />
+              </label>
+              <label className="flex-1 text-sm text-stone-600">
+                По
+                <input
+                  type="date"
+                  value={endDate}
+                  onChange={(e) => setEndDate(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-amber-200 p-2"
+                />
+              </label>
+            </div>
+            {!challengeValid && (
+              <p className="mt-2 text-xs text-red-500">
+                Выбери хотя бы один день недели и проверь даты.
+              </p>
+            )}
+            {challenge && (
+              <p className="mt-2 text-xs text-stone-400">
+                Отметки чекинов сохраняются при изменении расписания.
+              </p>
+            )}
+          </div>
+        )}
+
         <div className="mt-4 flex gap-2">
           <button
             onClick={onClose}
@@ -226,7 +360,7 @@ function DvizhForm({ dvizh, onClose }: { dvizh: Dvizh | null; onClose: () => voi
           </button>
           <button
             onClick={save}
-            disabled={!title.trim()}
+            disabled={!title.trim() || !challengeValid}
             className="flex-1 rounded-xl bg-amber-500 py-3 font-semibold text-white disabled:opacity-40"
           >
             Сохранить

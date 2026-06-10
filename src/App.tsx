@@ -1,6 +1,7 @@
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db, DEFAULT_SETTINGS, type Settings } from './db.ts'
+import { expectedDates, todayStr } from './lib/dates.ts'
 import Onboarding from './Onboarding.tsx'
 import DvizhiPage from './pages/DvizhiPage.tsx'
 import ChallengesPage from './pages/ChallengesPage.tsx'
@@ -27,6 +28,25 @@ export default function App() {
     null,
   )
 
+  // Сколько челленджей ждут чекина сегодня — для бейджа на вкладке
+  const todayCount = useLiveQuery(async () => {
+    const today = todayStr()
+    const challenges = await db.challenge.toArray()
+    let n = 0
+    for (const c of challenges) {
+      if (!expectedDates(c).includes(today)) continue
+      const dvizh = await db.dvizh.get(c.dvizhId)
+      if (!dvizh || dvizh.status !== 'active') continue
+      const checkin = await db.checkin
+        .where('challengeId')
+        .equals(c.id)
+        .and((x) => x.date === today)
+        .first()
+      if (!checkin) n++
+    }
+    return n
+  }, []) ?? 0
+
   if (settings === null) return null
   if (!settings.onboardingCompleted) return <Onboarding />
 
@@ -51,7 +71,14 @@ export default function App() {
               }`
             }
           >
-            <span className="text-xl">{tab.emoji}</span>
+            <span className="relative text-xl">
+              {tab.emoji}
+              {tab.to === '/challenges' && todayCount > 0 && (
+                <span className="absolute -right-2 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white">
+                  {todayCount}
+                </span>
+              )}
+            </span>
             {tab.label}
           </NavLink>
         ))}
